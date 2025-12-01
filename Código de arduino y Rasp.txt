@@ -1,0 +1,307 @@
+// ******************************************************************************************************
+// -- C Ó D I G O    D E    A R D U I N O     ***********************************************************
+// ******************************************************************************************************
+// ======================================================
+//               SoftwareSerial hacia Raspberry
+// ======================================================
+#include <SoftwareSerial.h>
+SoftwareSerial mySerial(3, 2); 
+// RX = 3 (no usado)
+// TX = 2 (hacia Raspberry)
+
+
+// ======================================================
+//               Sensor Luz
+// ======================================================
+const int sensorPin = 9;  // Pin digital del sensor
+int valorSensor = 0;
+
+// ======================================================
+//               Sensor DHT11
+// ======================================================
+#include <DHT_U.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+
+#define DHTPIN 5
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+
+// ======================================================
+//               Sensor de sonido
+// ======================================================
+int MIC = 7; 
+int LED = 6;
+
+
+// ======================================================
+//               Sensor de corriente ACS712
+// ======================================================
+const int pinSensor = A0;
+const float vRef = 5.0;
+const float sensibilidad = 0.100; // 20A → 100mV/A
+const int N = 400;
+
+float offset = 0;
+
+
+// ======================================================
+//                      SETUP
+// ======================================================
+void setup() {
+  Serial.begin(9600);
+  mySerial.begin(9600);
+
+  // Inicio sensores
+  dht.begin();              // temp
+  pinMode(MIC, INPUT);      // Sonido
+  pinMode(LED, OUTPUT);     // Sonido
+  pinMode(sensorPin, INPUT);
+
+  // ---------- Calibración del ACS712 -----------------
+  Serial.println("Calibrando sensor de corriente...");
+  delay(1500);
+
+  long suma = 0;
+  for (int i = 0; i < N; i++) {
+    suma += analogRead(pinSensor);
+    delay(2);
+  }
+
+  float promedio = suma / (float)N;
+  offset = promedio * (vRef / 1023.0);
+
+  Serial.print("Offset: ");
+  Serial.print(offset, 4);
+  Serial.println(" V");
+  Serial.println("--------------------------------------");
+}
+
+
+// ======================================================
+//                      LOOP
+// ======================================================
+void loop() {
+
+  // ---------------------------------------------------
+  //       Lectura del DHT11
+  // ---------------------------------------------------
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+
+
+  // ---------------------------------------------------
+  //       Lectura del sensor de sonido
+  // ---------------------------------------------------
+  int valor = digitalRead(MIC);
+  String sonido = (valor == HIGH) ? "Fuerte" : "Bajo";
+
+  digitalWrite(LED, valor == HIGH ? HIGH : LOW);
+
+
+  // ---------------------------------------------------
+  //       Lectura del sensor de corriente ACS712
+  // ---------------------------------------------------
+  long suma = 0;
+  for (int i = 0; i < N; i++) {
+    suma += analogRead(pinSensor);
+  }
+
+  float lecturaProm = suma / (float)N;
+  float voltajeSalida = lecturaProm * (vRef / 1023.0);
+
+  float corriente = (voltajeSalida - offset) / sensibilidad;
+
+  // ---------------------------------------------------
+  //       Lectura del sensor de Luz
+  // ---------------------------------------------------
+  valorSensor = digitalRead(sensorPin);
+  String luz = "Oscuridad";
+    if (valorSensor == HIGH) {
+      luz = "Oscuridad";
+    } else {
+      luz = "Luz Detectada";
+    }
+
+
+  // ---------------------------------------------------
+  //  Enviar datos a Raspberry (formato igual al tuyo)
+  // ---------------------------------------------------
+  mySerial.print("TEMP:");
+  mySerial.print(t);
+
+  //mySerial.print(" | HUM:");
+  //mySerial.print(h);
+
+  mySerial.print(" | SONIDO:");
+  mySerial.print(sonido);
+  
+  mySerial.print(" | Luz:");
+  mySerial.print(luz);
+
+  mySerial.print(" | CORRIENTE:");
+  mySerial.print(corriente, 3);
+  mySerial.println(" A");
+
+
+  // ---------------------------------------------------
+  //          Debug por Serial normal
+  // ---------------------------------------------------
+  Serial.print("TEMP:");
+  Serial.print(t);
+
+  Serial.print(" | HUM:");
+  Serial.print(h);
+
+  Serial.print(" | SONIDO:");
+  Serial.print(sonido);
+
+  Serial.print(" | CORRIENTE:");
+  Serial.print(corriente, 3);
+  Serial.println(" A");
+
+  delay(100);
+}
+
+
+
+
+
+
+// ******************************************************************************************************
+// -- C Ó D I G O    D E    R A S P B E R R Y    P I C O    W     ***************************************
+// ******************************************************************************************************
+
+# ==========================================================
+#   RASPBERRY PI PICO: 
+# ==========================================================
+
+from machine import UART, Pin
+import network
+import urequests
+import json
+import time
+
+# ---------------- UART ------------------
+uart = UART(0, baudrate=9600, tx=Pin(0), rx=Pin(1))
+print("UART Listo...")
+
+buffer = b""
+
+
+# ---------------- WIFI ------------------
+WIFI_SSID = "DigitalNet_2345"
+WIFI_PASS = "WE236FFE"
+
+def conectar_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(WIFI_SSID, WIFI_PASS)
+
+    print("Conectando a WiFi...")
+    while not wlan.isconnected():
+        print("Esperando conexión...")
+        time.sleep(1)
+
+    print("Conectado a WiFi:", wlan.ifconfig())
+
+
+# ---------------- FIREBASE (FIRESTORE REST API) ------------------
+FIREBASE_PROJECT = "raspberrymonitor-1ec1d"
+DOCUMENT_PATH = "sensores/sensores"
+
+FIREBASE_URL = (
+    "https://firestore.googleapis.com/v1/projects/"
+    + FIREBASE_PROJECT +
+    "/databases/(default)/documents/"
+    + DOCUMENT_PATH
+)
+
+def enviar_a_firebase(temp, sonido, luz, corriente):
+    headers = {"Content-Type": "application/json"}
+
+    data = {
+        "fields": {
+            "Temperatura": {"stringValue": str(temp)},
+            "Sonido": {"stringValue": sonido},
+            "Luz": {"stringValue": luz},
+            "Corriente": {"stringValue": str(corriente)}
+        }
+    }
+
+    response = urequests.patch(FIREBASE_URL,
+                               data=json.dumps(data),
+                               headers=headers)
+
+    print("Firebase:", response.text)
+    response.close()
+
+
+# ---------------- PARSEAR LINEA ------------------
+def parsear_linea(linea):
+    # Ejemplo de línea:
+    # TEMP:20.00 | SONIDO:Bajo | Luz:Luz Detectada | CORRIENTE:-0.001 A
+    partes = linea.split("|")
+
+    temp = sonido = luz = corriente = "N/A"
+
+    try:
+        for p in partes:
+            p = p.strip()
+
+            if p.startswith("TEMP:"):
+                temp = p.replace("TEMP:", "").strip()
+
+            elif p.startswith("SONIDO:"):
+                sonido = p.replace("SONIDO:", "").strip()
+
+            elif p.startswith("Luz:"):
+                luz = p.replace("Luz:", "").strip()
+
+            elif p.startswith("CORRIENTE:"):
+                corriente = p.replace("CORRIENTE:", "").strip()
+
+    except:
+        print("Error al parsear:", linea)
+
+    return temp, sonido, luz, corriente
+
+
+# ---------------- PROGRAMA PRINCIPAL ------------------
+conectar_wifi()
+
+print("Esperando datos del Arduino...\n")
+
+while True:
+
+    # ----- LEER BYTE A BYTE -----
+    if uart.any():
+        ch = uart.read(1)
+
+        if ch:
+            buffer += ch
+
+            if ch == b"\n":       # cuando llega una línea completa
+                linea = buffer.decode().strip()
+                print("Recibido:", linea)
+
+                # limpiar buffer
+                buffer = b""
+
+                # ----- PARSEAR -----
+                temp, sonido, luz, corriente = parsear_linea(linea)
+
+                print("TEMP:", temp)
+                print("SONIDO:", sonido)
+                print("LUZ:", luz)
+                print("CORRIENTE:", corriente)
+
+                # ----- ENVIAR A FIREBASE -----
+                enviar_a_firebase(temp, sonido, luz, corriente)
+
+    time.sleep(0.001)
+
+
+
+
